@@ -7,9 +7,9 @@
         "Icon": "utilities-system-monitor",
         "Category": "System Information",
         "License": "MIT",
-        "Version": "1.0",
+        "Version": "1.0.1",
         "Authors": [
-            { "Name": "Damian" }
+            { "Name": "DdeDamian" }
         ]
     },
     "X-Plasma-API": "declarativeappletscript",
