@@ -1,0 +1,7 @@
+# build artifacts
+*.plasmoid
+
+# editor / OS cruft
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Id": "io.github.ddedamian.claudequota",
+        "Name": "Claude Quota",
+        "Description": "Tracks Claude usage — 5-hour window and weekly limits — via real claude.ai utilization or a local ccusage estimate",
+        "Icon": "utilities-system-monitor",
+        "Category": "System Information",
+        "License": "MIT",
+        "Version": "1.0",
+        "Authors": [
+            { "Name": "Damian" }
+        ]
+    },
+    "X-Plasma-API": "declarativeappletscript",
+    "X-Plasma-MainScript": "ui/main.qml"
+}

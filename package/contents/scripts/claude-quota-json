@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Emits compact JSON for the "Claude Quota" KDE plasmoid.
+#
+# Two data sources, selected by CLAUDE_QUOTA_MODE (local|online|auto):
+#   local  - ccusage over ~/.claude transcripts. Offline, never breaks, but a
+#            token *proxy* (% is vs a denominator, not your real quota).
+#   online - claude.ai's internal usage endpoint = your REAL session/weekly
+#            utilization %. Needs your browser request (cookies beat Cloudflare).
+#   auto   - try online, fall back to local on any failure.
+#
+# Online auth (in order of preference):
+#   1. Claude Code login token from ~/.claude/.credentials.json (DEFAULT, no
+#      setup) -> api.anthropic.com/api/oauth/usage. Has user:profile scope.
+#   2. Explicit pasted Bearer token (override).
+#   3. claude.ai cookie + org id -> claude.ai/.../usage (Cloudflare-gated).
+#   4. ~/.config/claude-quota/request.sh -> replay a saved "Copy as cURL".
+#
+# Local denominators (0/unset => p90 of history, ignoring outliers):
+#   CLAUDE_QUOTA_TOKEN_LIMIT, CLAUDE_QUOTA_WEEKLY_LIMIT
+# Cache: CLAUDE_QUOTA_CACHE_TTL seconds (default 30).
+set -uo pipefail
+
+MODE="${CLAUDE_QUOTA_MODE:-local}"
+WIN_LIMIT="${CLAUDE_QUOTA_TOKEN_LIMIT:-auto}"
+WEEK_LIMIT="${CLAUDE_QUOTA_WEEKLY_LIMIT:-auto}"
+TTL="${CLAUDE_QUOTA_CACHE_TTL:-30}"
+REQ_FILE="${CLAUDE_QUOTA_REQUEST_FILE:-$HOME/.config/claude-quota/request.sh}"
+CRED_FILE="${CLAUDE_QUOTA_CRED_FILE:-$HOME/.claude/.credentials.json}"
+
+# ---------------------------------------------------------------------------
+# ONLINE: replay the browser's request, parse claude.ai's real utilization.
+# Prints JSON and returns 0 on success; returns non-zero on any failure.
+# ---------------------------------------------------------------------------
+_oauth_usage() { # $1 = bearer token -> echoes response body
+  curl -s --max-time 8 \
+    -H "Authorization: Bearer $1" \
+    -H "anthropic-beta: oauth-2025-04-20" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "Accept: application/json" \
+    "https://api.anthropic.com/api/oauth/usage" 2>/dev/null
+}
+
+fetch_online() {
+  local resp="" token=""
+  if [ -n "${CLAUDE_QUOTA_TOKEN_B64:-}" ]; then
+    # Explicit override: a pasted Bearer token (note: `claude setup-token`
+    # tokens lack the user:profile scope and will 403 here).
+    token=$(printf '%s' "$CLAUDE_QUOTA_TOKEN_B64" | base64 -d 2>/dev/null)
+    resp=$(_oauth_usage "$token")
+  elif [ -f "$CRED_FILE" ] && command -v jq >/dev/null 2>&1; then
+    # Default: reuse Claude Code's own login token (has user:profile, auto-
+    # refreshed while you use Claude Code). Clean api host, no cookies.
+    token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CRED_FILE" 2>/dev/null)
+    [ -n "$token" ] && resp=$(_oauth_usage "$token")
+  elif [ -n "${CLAUDE_QUOTA_COOKIE_B64:-}" ] && [ -n "${CLAUDE_QUOTA_ORG_ID:-}" ]; then
+    # Structured creds from the widget's Configure dialog (base64 to avoid any
+    # shell-quoting trouble with cookie characters).
+    local cookie ua
+    cookie=$(printf '%s' "$CLAUDE_QUOTA_COOKIE_B64" | base64 -d 2>/dev/null)
+    ua=$(printf '%s' "${CLAUDE_QUOTA_UA_B64:-}" | base64 -d 2>/dev/null)
+    [ -n "$ua" ] || ua="Mozilla/5.0"
+    resp=$(curl -s --max-time 8 \
+      -H "Cookie: $cookie" \
+      -H "User-Agent: $ua" \
+      -H "Accept: application/json" \
+      "https://claude.ai/api/organizations/$CLAUDE_QUOTA_ORG_ID/usage" 2>/dev/null)
+  elif [ -f "$REQ_FILE" ]; then
+    # Power-user fallback: replay a saved "Copy as cURL" request verbatim.
+    resp=$(bash "$REQ_FILE" 2>/dev/null)
+  else
+    return 1
+  fi
+  [ -n "$resp" ] || return 1
+  printf '%s' "$resp" | node -e '
+    let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+      let j; try { j = JSON.parse(s); } catch (e) { process.exit(1); }
+      if (!j || !j.five_hour) process.exit(1);   // Cloudflare HTML / login => bail
+      const now = Date.now(), DAY = 86400000;
+      const reset = iso => {
+        if (!iso) return { resetHuman: null, remainingMinutes: null, remainingDays: null };
+        const d = new Date(iso);
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mm = String(d.getMinutes()).padStart(2, "0");
+        const mins = Math.max(0, Math.round((d - now) / 60000));
+        return {
+          resetHuman: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + hh + ":" + mm,
+          remainingMinutes: mins,
+          remainingDays: Math.max(0, Math.ceil((d - now) / DAY))
+        };
+      };
+      const pct = o => o && typeof o.utilization === "number" ? Math.round(o.utilization) : 0;
+
+      const fh = j.five_hour || {}, sd = j.seven_day || {};
+      const fhR = reset(fh.resets_at), sdR = reset(sd.resets_at);
+      // 5h window: time-only is clearer than a date.
+      const fhTime = fh.resets_at ? (() => { const d = new Date(fh.resets_at); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); })() : null;
+
+      const names = {
+        seven_day_opus: "Opus", seven_day_sonnet: "Sonnet",
+        seven_day_omelette: "Claude Design", seven_day_cowork: "Cowork",
+        seven_day_oauth_apps: "OAuth apps"
+      };
+      const models = [];
+      for (const k in names) if (j[k] && typeof j[k].utilization === "number")
+        models.push({ name: names[k], pct: Math.round(j[k].utilization) });
+
+      const eu = j.extra_usage || {};
+      const extra = eu.is_enabled ? {
+        enabled: true,
+        used: eu.used_credits || 0,
+        limit: eu.monthly_limit || 0,
+        currency: eu.currency || "",
+        pct: eu.monthly_limit ? Math.round((eu.used_credits || 0) / eu.monthly_limit * 100) : 0
+      } : { enabled: false };
+
+      console.log(JSON.stringify({
+        source: "online",
+        window: { active: true, pct: pct(fh), resetHuman: fhTime, remainingMinutes: fhR.remainingMinutes },
+        week:   { active: true, pct: pct(sd), resetHuman: sdR.resetHuman, remainingMinutes: sdR.remainingMinutes, remainingDays: sdR.remainingDays },
+        models, extra
+      }));
+    });
+  ' && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# LOCAL: ccusage proxy (cached raw scan + p90 denominator + projection/ETA).
+# ---------------------------------------------------------------------------
+emit_local() {
+  if command -v ccusage >/dev/null 2>&1; then RUN=(ccusage); else RUN=(npx -y ccusage@latest); fi
+  local CACHE_DIR="${TMPDIR:-/tmp}"
+  local BLK="$CACHE_DIR/claude-quota-blocks-${UID:-$(id -u)}.json"
+  local WK="$CACHE_DIR/claude-quota-weekly-${UID:-$(id -u)}.json"
+  fresh() { [ -f "$1" ] && [ $(( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || echo 0) )) -lt "$TTL" ]; }
+
+  local blocks_raw weekly_raw
+  if fresh "$BLK" && fresh "$WK"; then
+    blocks_raw=$(cat "$BLK"); weekly_raw=$(cat "$WK")
+  else
+    blocks_raw="$("${RUN[@]}" blocks --offline --json 2>/dev/null)"
+    weekly_raw="$("${RUN[@]}" weekly --offline --json 2>/dev/null)"
+    [ -n "$blocks_raw" ] && printf '%s' "$blocks_raw" > "$BLK"
+    [ -n "$weekly_raw" ] && printf '%s' "$weekly_raw" > "$WK"
+  fi
+  if [ -z "${blocks_raw:-}" ] && [ -z "${weekly_raw:-}" ]; then echo '{"error":"ccusage failed"}'; return 0; fi
+
+  node -e '
+    const blocksRaw = process.argv[1], weeklyRaw = process.argv[2];
+    const winLimitArg = process.argv[3], weekLimitArg = process.argv[4];
+    const parse = s => { try { return JSON.parse(s); } catch (e) { return null; } };
+    const DAY = 86400000;
+    function p90(values) {
+      const s = values.filter(v => v > 0).sort((a, b) => a - b);
+      if (!s.length) return 1;
+      return Math.max(1, s[Math.min(s.length - 1, Math.floor(0.9 * s.length))]);
+    }
+    const resolveLimit = (arg, all) => (arg === "auto" || arg === "max") ? p90(all) : (parseInt(arg, 10) || 1);
+
+    let windowOut = { active: false };
+    const bj = parse(blocksRaw);
+    if (bj) {
+      const blocks = (bj.blocks || []).filter(b => !b.isGap);
+      const active = blocks.find(b => b.isActive);
+      if (active) {
+        const tokens = active.totalTokens || 0;
+        const limit = resolveLimit(winLimitArg, blocks.map(b => b.totalTokens || 0));
+        const burn = active.burnRate ? Math.round(active.burnRate.tokensPerMinute) : 0;
+        const proj = active.projection ? active.projection.totalTokens : tokens;
+        const r = new Date(active.endTime);
+        const eta = (burn > 0 && tokens < limit) ? Math.round((limit - tokens) / burn) : null;
+        windowOut = {
+          active: true, tokens, limit,
+          pct: Math.min(100, Math.round(tokens / limit * 100)),
+          cost: Math.round((active.costUSD || 0) * 100) / 100,
+          burn, projection: proj, projectionPct: Math.round(proj / limit * 100), etaMinutes: eta,
+          resetHuman: String(r.getHours()).padStart(2, "0") + ":" + String(r.getMinutes()).padStart(2, "0"),
+          remainingMinutes: Math.max(0, Math.round((r - Date.now()) / 60000))
+        };
+      }
+    }
+    let weekOut = { active: false };
+    const wj = parse(weeklyRaw);
+    if (wj) {
+      const weeks = wj.weekly || wj.weeks || wj.data || [];
+      const now = Date.now();
+      let cur = null;
+      for (const w of weeks) { const s = new Date(w.period + "T00:00:00").getTime(); if (s <= now && now < s + 7 * DAY) { cur = { w, end: s + 7 * DAY }; break; } }
+      if (!cur && weeks.length) { const w = weeks[weeks.length - 1]; const s = new Date(w.period + "T00:00:00").getTime(); cur = { w, end: s + 7 * DAY }; }
+      if (cur) {
+        const tokens = cur.w.totalTokens || 0;
+        const limit = resolveLimit(weekLimitArg, weeks.map(x => x.totalTokens || 0));
+        weekOut = { active: true, tokens, limit, pct: Math.min(100, Math.round(tokens / limit * 100)), cost: Math.round((cur.w.totalCost || 0) * 100) / 100, remainingDays: Math.max(0, Math.ceil((cur.end - now) / DAY)) };
+      }
+    }
+    console.log(JSON.stringify({ source: "local", window: windowOut, week: weekOut }));
+  ' "$blocks_raw" "$weekly_raw" "$WIN_LIMIT" "$WEEK_LIMIT"
+}
+
+# ---------------------------------------------------------------------------
+case "$MODE" in
+  online) fetch_online || echo '{"error":"online fetch failed (token/cookie invalid or endpoint changed)"}' ;;
+  auto)   fetch_online || emit_local ;;
+  *)      emit_local ;;
+esac
