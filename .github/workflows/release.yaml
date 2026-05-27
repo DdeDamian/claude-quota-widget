@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # semantic-release needs full history + tags
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: semantic-release
+        id: release
+        uses: ridedott/release-me-action@v3.10.7
+        with:
+          release-branches: '["main"]'
+          releaseRules: '[
+            { "release": "major", "type": "breaking" },
+            { "release": "minor", "type": "feat" },
+            { "release": "patch", "type": "fix" }
+          ]'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # On a new release, stamp the version into metadata.json, build the
+      # .plasmoid, and attach it (versioned + stable name) to the release.
+      - name: Build and attach .plasmoid
+        if: steps.release.outputs.released == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          sed -i -E "s/(\"Version\"[[:space:]]*:[[:space:]]*\")[^\"]+/\1${VERSION}/" package/metadata.json
+          ./build.sh
+          gh release upload "v${VERSION}" claude-quota.plasmoid "claude-quota-${VERSION}.plasmoid" --clobber

@@ -13,18 +13,15 @@ Item {
     // the executable engine, which needs a plain filesystem path.
     readonly property string scriptPath: Qt.resolvedUrl("../scripts/claude-quota-json").toString().replace(/^file:\/\//, "")
 
-    // Build the command, injecting config. Creds are base64-encoded so cookie
-    // characters can't break shell quoting. Also sidesteps the executable
+    // Build the command, injecting config. A pasted token is base64-encoded so
+    // its characters can't break shell quoting. Also sidesteps the executable
     // engine not inheriting your interactive shell rc.
     function buildCmd() {
         var c = plasmoid.configuration
         var parts = ["CLAUDE_QUOTA_MODE=" + (c.mode || "local")]
         if (c.tokenLimit > 0)       parts.push("CLAUDE_QUOTA_TOKEN_LIMIT=" + c.tokenLimit)
         if (c.weeklyTokenLimit > 0) parts.push("CLAUDE_QUOTA_WEEKLY_LIMIT=" + c.weeklyTokenLimit)
-        if (c.token)     parts.push("CLAUDE_QUOTA_TOKEN_B64=" + Qt.btoa(c.token))
-        if (c.orgId)     parts.push("CLAUDE_QUOTA_ORG_ID=" + c.orgId)
-        if (c.cookie)    parts.push("CLAUDE_QUOTA_COOKIE_B64=" + Qt.btoa(c.cookie))
-        if (c.userAgent) parts.push("CLAUDE_QUOTA_UA_B64=" + Qt.btoa(c.userAgent))
+        if (c.token) parts.push("CLAUDE_QUOTA_TOKEN_B64=" + Qt.btoa(c.token))
         return parts.join(" ") + " bash '" + scriptPath + "'"
     }
 
@@ -61,7 +58,6 @@ Item {
     property real extraUsed: 0
     property int extraLimit: 0
     property string extraCurrency: ""
-    property int extraPct: 0
 
     function fmtTokens(t) {
         if (t >= 1e6) return (t / 1e6).toFixed(2) + "M"
@@ -120,7 +116,7 @@ Item {
                     root.extraEnabled = ex.enabled === true
                     if (root.extraEnabled) {
                         root.extraUsed = ex.used || 0; root.extraLimit = ex.limit || 0
-                        root.extraCurrency = ex.currency || ""; root.extraPct = ex.pct || 0
+                        root.extraCurrency = ex.currency || ""
                     }
                 }
             } catch (e) {

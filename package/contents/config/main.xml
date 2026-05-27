@@ -22,18 +22,9 @@
       <default>0</default>
     </entry>
 
-    <!-- ONLINE (preferred): OAuth Bearer token from `claude setup-token`. -->
+    <!-- ONLINE: optional Bearer token override. Leave blank to auto-read the
+         Claude Code login token from ~/.claude/.credentials.json. -->
     <entry name="token" type="String">
-      <default></default>
-    </entry>
-    <!-- ONLINE (fallback): claude.ai cookie auth. -->
-    <entry name="orgId" type="String">
-      <default></default>
-    </entry>
-    <entry name="cookie" type="String">
-      <default></default>
-    </entry>
-    <entry name="userAgent" type="String">
       <default></default>
     </entry>
   </group>

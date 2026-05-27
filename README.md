@@ -82,7 +82,7 @@ Right-click the widget → **Configure Claude Quota**.
 
 **Online data**
 - Nothing required — online mode reuses your Claude Code login token automatically.
-- *Overrides (optional):* a pasted Bearer token, or a cookie-based fallback.
+- *Override (optional):* a pasted Bearer token (must have the `user:profile` scope).
 
 ## Modes
 
@@ -112,8 +112,8 @@ use it. The response is the real utilization, e.g.:
 }
 ```
 
-Auth precedence: pasted Bearer token → Claude Code credentials file → cookie → saved
-cURL request. If none work, `auto` falls back to local.
+Auth: a pasted Bearer token override if you set one, otherwise the Claude Code login
+token. If neither works, `auto` falls back to local.
 
 > **Note:** `claude setup-token` tokens are *inference-scoped* and lack `user:profile`,
 > so they are rejected (403) by this endpoint. Use the Claude Code login token (the default).

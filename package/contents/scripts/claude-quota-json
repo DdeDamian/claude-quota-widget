@@ -2,18 +2,13 @@
 # Emits compact JSON for the "Claude Quota" KDE plasmoid.
 #
 # Two data sources, selected by CLAUDE_QUOTA_MODE (local|online|auto):
-#   local  - ccusage over ~/.claude transcripts. Offline, never breaks, but a
-#            token *proxy* (% is vs a denominator, not your real quota).
-#   online - claude.ai's internal usage endpoint = your REAL session/weekly
-#            utilization %. Needs your browser request (cookies beat Cloudflare).
+#   local  - ccusage over ~/.claude transcripts. Offline; a token *proxy*
+#            (% is vs a denominator, not your real quota).
+#   online - your REAL session/weekly utilization from api.anthropic.com, via
+#            Claude Code's login token (auto-read from ~/.claude/.credentials.json,
+#            which carries the user:profile scope). A pasted Bearer token, passed
+#            as CLAUDE_QUOTA_TOKEN_B64, overrides the auto-read one.
 #   auto   - try online, fall back to local on any failure.
-#
-# Online auth (in order of preference):
-#   1. Claude Code login token from ~/.claude/.credentials.json (DEFAULT, no
-#      setup) -> api.anthropic.com/api/oauth/usage. Has user:profile scope.
-#   2. Explicit pasted Bearer token (override).
-#   3. claude.ai cookie + org id -> claude.ai/.../usage (Cloudflare-gated).
-#   4. ~/.config/claude-quota/request.sh -> replay a saved "Copy as cURL".
 #
 # Local denominators (0/unset => p90 of history, ignoring outliers):
 #   CLAUDE_QUOTA_TOKEN_LIMIT, CLAUDE_QUOTA_WEEKLY_LIMIT
@@ -24,12 +19,11 @@ MODE="${CLAUDE_QUOTA_MODE:-local}"
 WIN_LIMIT="${CLAUDE_QUOTA_TOKEN_LIMIT:-auto}"
 WEEK_LIMIT="${CLAUDE_QUOTA_WEEKLY_LIMIT:-auto}"
 TTL="${CLAUDE_QUOTA_CACHE_TTL:-30}"
-REQ_FILE="${CLAUDE_QUOTA_REQUEST_FILE:-$HOME/.config/claude-quota/request.sh}"
 CRED_FILE="${CLAUDE_QUOTA_CRED_FILE:-$HOME/.claude/.credentials.json}"
 
 # ---------------------------------------------------------------------------
-# ONLINE: replay the browser's request, parse claude.ai's real utilization.
-# Prints JSON and returns 0 on success; returns non-zero on any failure.
+# ONLINE: query api.anthropic.com/api/oauth/usage for the real utilization.
+# Prints JSON and returns 0 on success; non-zero on any failure.
 # ---------------------------------------------------------------------------
 _oauth_usage() { # $1 = bearer token -> echoes response body
   curl -s --max-time 8 \
@@ -52,21 +46,6 @@ fetch_online() {
     # refreshed while you use Claude Code). Clean api host, no cookies.
     token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CRED_FILE" 2>/dev/null)
     [ -n "$token" ] && resp=$(_oauth_usage "$token")
-  elif [ -n "${CLAUDE_QUOTA_COOKIE_B64:-}" ] && [ -n "${CLAUDE_QUOTA_ORG_ID:-}" ]; then
-    # Structured creds from the widget's Configure dialog (base64 to avoid any
-    # shell-quoting trouble with cookie characters).
-    local cookie ua
-    cookie=$(printf '%s' "$CLAUDE_QUOTA_COOKIE_B64" | base64 -d 2>/dev/null)
-    ua=$(printf '%s' "${CLAUDE_QUOTA_UA_B64:-}" | base64 -d 2>/dev/null)
-    [ -n "$ua" ] || ua="Mozilla/5.0"
-    resp=$(curl -s --max-time 8 \
-      -H "Cookie: $cookie" \
-      -H "User-Agent: $ua" \
-      -H "Accept: application/json" \
-      "https://claude.ai/api/organizations/$CLAUDE_QUOTA_ORG_ID/usage" 2>/dev/null)
-  elif [ -f "$REQ_FILE" ]; then
-    # Power-user fallback: replay a saved "Copy as cURL" request verbatim.
-    resp=$(bash "$REQ_FILE" 2>/dev/null)
   else
     return 1
   fi
@@ -109,14 +88,13 @@ fetch_online() {
         enabled: true,
         used: eu.used_credits || 0,
         limit: eu.monthly_limit || 0,
-        currency: eu.currency || "",
-        pct: eu.monthly_limit ? Math.round((eu.used_credits || 0) / eu.monthly_limit * 100) : 0
+        currency: eu.currency || ""
       } : { enabled: false };
 
       console.log(JSON.stringify({
         source: "online",
         window: { active: true, pct: pct(fh), resetHuman: fhTime, remainingMinutes: fhR.remainingMinutes },
-        week:   { active: true, pct: pct(sd), resetHuman: sdR.resetHuman, remainingMinutes: sdR.remainingMinutes, remainingDays: sdR.remainingDays },
+        week:   { active: true, pct: pct(sd), resetHuman: sdR.resetHuman, remainingDays: sdR.remainingDays },
         models, extra
       }));
     });
@@ -199,7 +177,7 @@ emit_local() {
 
 # ---------------------------------------------------------------------------
 case "$MODE" in
-  online) fetch_online || echo '{"error":"online fetch failed (token/cookie invalid or endpoint changed)"}' ;;
+  online) fetch_online || echo '{"error":"online fetch failed (token invalid/expired or endpoint changed)"}' ;;
   auto)   fetch_online || emit_local ;;
   *)      emit_local ;;
 esac
